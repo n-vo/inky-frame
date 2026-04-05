@@ -115,8 +115,34 @@ def local_now():
     l = time.localtime(local_t)
     tz = "CDT" if offset == -18000 else "CST"
     date_str = "{:04d}-{:02d}-{:02d}".format(l[0], l[1], l[2])
-    time_str = "{:02d}:{:02d}".format(l[3], l[4])
+    hour = l[3]
+    ampm = "AM" if hour < 12 else "PM"
+    hour12 = hour % 12 or 12
+    time_str = "{}:{:02d} {}".format(hour12, l[4], ampm)
     return date_str, time_str, tz
+
+
+def fmt_time_12h(hhmm):
+    """Convert 'HH:MM' 24h string to '12:34 AM' format"""
+    h, m = int(hhmm[:2]), int(hhmm[3:5])
+    ampm = "AM" if h < 12 else "PM"
+    h12 = h % 12 or 12
+    return "{}:{:02d} {}".format(h12, m, ampm)
+
+
+def uv_label(uv):
+    """Return UV risk label"""
+    uv = int(uv)
+    if uv <= 2:
+        return "Low"
+    elif uv <= 5:
+        return "Moderate"
+    elif uv <= 7:
+        return "High"
+    elif uv <= 10:
+        return "Very High"
+    else:
+        return "Extreme"
 
 
 def weather_description(code):
@@ -156,7 +182,7 @@ def fetch_weather():
             "https://api.open-meteo.com/v1/forecast"
             "?latitude={}&longitude={}"
             "&current_weather=true"
-            "&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_probability_max"
+            "&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_probability_max,uv_index_max,sunrise,sunset"
             "&temperature_unit=fahrenheit"
             "&wind_speed_unit=mph"
             "&timezone=America%2FChicago"
@@ -179,6 +205,9 @@ def fetch_weather():
             "daily_low": daily["temperature_2m_min"],
             "daily_code": daily["weathercode"],
             "daily_precip": daily["precipitation_probability_max"],
+            "uv_index":     daily["uv_index_max"][0],
+            "sunrise":      daily["sunrise"][0][11:16],
+            "sunset":       daily["sunset"][0][11:16],
         }
     except Exception as e:
         print("Weather fetch failed: {}".format(e))
@@ -279,9 +308,22 @@ def draw_weather(weather, date_str, time_str, tz):
             graphics.set_pen(PEN_BLACK)
             graphics.line(cx, strip_y - 2, cx, strip_y + 72)
 
-    graphics.line(20, 440, WIDTH - 20, 440)
+    # UV / Sunrise / Sunset info bar
+    uv   = weather.get("uv_index", 0)
+    rise = fmt_time_12h(weather.get("sunrise", "06:00"))
+    sset = fmt_time_12h(weather.get("sunset", "19:00"))
+    uvlbl = uv_label(uv)
+
+    graphics.line(20, 400, WIDTH - 20, 400)
+    graphics.set_pen(PEN_YELLOW)
+    graphics.text("UV: {} ({})".format(int(uv), uvlbl), 30, 412, scale=2)
     graphics.set_pen(PEN_BLACK)
-    graphics.text("Press B for servers", 220, 455, scale=2)
+    graphics.text("Sunrise: {}".format(rise), 300, 412, scale=2)
+    graphics.text("Sunset: {}".format(sset), 560, 412, scale=2)
+
+    graphics.line(20, 438, WIDTH - 20, 438)
+    graphics.set_pen(PEN_BLACK)
+    graphics.text("Press B for servers", 270, 450, scale=2)
 
     print("Weather display updated")
     graphics.update()
