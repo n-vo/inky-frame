@@ -314,7 +314,7 @@ def draw_weather(weather, date_str, time_str, tz):
     sset = fmt_time_12h(weather.get("sunset", "19:00"))
     uvlbl = uv_label(uv)
 
-    print(f"Strip y: {strip_y}")
+    # print(f"Strip y: {strip_y}")
     extra_info_y = strip_y + 80  # 300
     graphics.line(20, extra_info_y, WIDTH - 20, extra_info_y)
     graphics.set_pen(PEN_BLACK)
