@@ -119,95 +119,164 @@ def local_now():
     return date_str, time_str, tz
 
 
-def get_simple_weather():
-    """Return simple hardcoded weather"""
-    return {
-        "temp": 75,
-        "humidity": 65,
-        "wind_speed": 8,
-        "weather_code": 3,
-        "is_day": 1,
-    }
-
-
-def weather_description(code, is_day):
-    """Get weather description from WMO code"""
+def weather_description(code):
+    """Get short condition label from WMO code"""
     if code == 0:
-        return ("Clear sky", "SUN" if is_day else "MOON")
-    elif code == 1 or code == 2:
-        return ("Mostly clear", "PART")
+        return "Clear"
+    elif code in [1, 2]:
+        return "Pt Cloudy"
     elif code == 3:
-        return ("Overcast", "CLOUD")
-    elif code == 45 or code == 48:
-        return ("Foggy", "FOG")
-    elif code in [51, 53, 55]:
-        return ("Drizzle", "RAIN")
-    elif code in [61, 63, 65]:
-        return ("Rain", "RAIN")
-    elif code in [71, 73, 75, 77, 80, 81, 82]:
-        return ("Rain/Snow", "SNOW")
-    elif code in [85, 86]:
-        return ("Snow", "SNOW")
+        return "Overcast"
+    elif code in [45, 48]:
+        return "Foggy"
+    elif code in [51, 53, 55, 61, 63, 65, 80, 81, 82]:
+        return "Rain"
+    elif code in [71, 73, 75, 77, 85, 86]:
+        return "Snow"
     elif code in [95, 96, 99]:
-        return ("Thunderstorm", "STORM")
+        return "Tstorm"
     else:
-        return ("Unknown", "UNKNOWN")
+        return "Unknown"
+
+
+def day_abbrev(date_str):
+    """Return 3-letter weekday from YYYY-MM-DD string"""
+    y = int(date_str[:4])
+    m = int(date_str[5:7])
+    d = int(date_str[8:10])
+    t = time.mktime((y, m, d, 0, 0, 0, 0, 0))
+    wd = time.localtime(t)[6]  # 0=Mon, 6=Sun
+    return ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"][wd]
+
+
+def fetch_weather():
+    """Fetch 7-day forecast from Open-Meteo (no API key required)"""
+    try:
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            "?latitude={}&longitude={}"
+            "&current_weather=true"
+            "&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_probability_max"
+            "&temperature_unit=fahrenheit"
+            "&wind_speed_unit=mph"
+            "&timezone=America%2FChicago"
+            "&forecast_days=7"
+        ).format(LATITUDE, LONGITUDE)
+        print("Fetching weather...")
+        r = urequests.get(url, timeout=15)
+        raw = r.json()
+        r.close()
+
+        cw = raw["current_weather"]
+        daily = raw["daily"]
+        return {
+            "current_temp":      cw["temperature"],
+            "current_wind":      cw["windspeed"],
+            "current_code":      cw["weathercode"],
+            "current_is_day":    cw["is_day"],
+            "daily_dates":       daily["time"],
+            "daily_high":        daily["temperature_2m_max"],
+            "daily_low":         daily["temperature_2m_min"],
+            "daily_code":        daily["weathercode"],
+            "daily_precip":      daily["precipitation_probability_max"],
+        }
+    except Exception as e:
+        print("Weather fetch failed: {}".format(e))
+        return None
 
 
 def draw_weather(weather, date_str, time_str, tz):
-    """Render weather dashboard"""
+    """Render 7-day forecast dashboard"""
     graphics.set_pen(PEN_WHITE)
     graphics.clear()
     graphics.set_pen(PEN_BLACK)
 
     # Header
-    graphics.text("WEATHER STATION", 40, 18, scale=3)
+    graphics.text("WEATHER STATION", 20, 10, scale=3)
     graphics.text(
-        "{} - {} {} {}".format(LOCATION_NAME, date_str, time_str, tz), 40, 52, scale=2
+        "{}   {} {} {}".format(LOCATION_NAME, date_str, time_str, tz), 20, 42, scale=2
     )
-    graphics.line(40, 74, WIDTH - 40, 74)
+    graphics.line(20, 66, WIDTH - 20, 66)
 
     if weather is None:
         graphics.set_pen(PEN_RED)
-        graphics.text("ERROR", 200, 300, scale=6)
+        graphics.text("ERROR", 200, 200, scale=6)
         graphics.set_pen(PEN_BLACK)
-        graphics.text("Could not fetch weather", 80, 380, scale=2)
-        graphics.line(40, 420, WIDTH - 40, 420)
-        graphics.text("Press B for servers", 220, 440, scale=2)
+        graphics.text("Could not fetch weather data", 80, 320, scale=2)
+        graphics.line(20, 440, WIDTH - 20, 440)
+        graphics.text("Press B for servers", 220, 455, scale=2)
         graphics.update()
         return
 
-    # Weather data
-    temp = weather.get("temp", 0)
-    humidity = weather.get("humidity", 0)
-    wind = weather.get("wind_speed", 0)
-    code = weather.get("weather_code", 0)
-    is_day = weather.get("is_day", 1)
+    # Current conditions
+    temp   = weather["current_temp"]
+    wind   = weather["current_wind"]
+    code   = weather["current_code"]
+    is_day = weather["current_is_day"]
+    desc   = weather_description(code)
 
-    desc, icon = weather_description(code, is_day)
-
-    # Main temperature
     graphics.set_pen(PEN_BLUE)
-    graphics.text("{}F".format(int(temp)), 60, 120, scale=8)
-
-    # Condition
-    graphics.set_pen(PEN_BLACK)
-    graphics.text(desc, 60, 250, scale=4)
-
-    # Details box
-    graphics.set_pen(PEN_BLACK)
-    graphics.rectangle(60, 330, 680, 100)
-    graphics.set_pen(PEN_WHITE)
-    graphics.rectangle(62, 332, 676, 96)
+    graphics.text("{}F".format(int(temp)), 20, 80, scale=7)
 
     graphics.set_pen(PEN_BLACK)
-    graphics.text("Humidity: {}%".format(int(humidity)), 75, 345, scale=2)
-    graphics.text("Wind: {} mph".format(int(wind)), 75, 375, scale=2)
+    graphics.text(desc, 20, 200, scale=3)
+    graphics.text("Wind: {} mph".format(int(wind)), 20, 238, scale=2)
 
-    graphics.line(40, 420, WIDTH - 40, 420)
-    graphics.text("Press B for servers", 220, 440, scale=2)
+    # Today high/low from daily[0]
+    today_hi = int(weather["daily_high"][0])
+    today_lo = int(weather["daily_low"][0])
+    today_precip = weather["daily_precip"][0]
+    graphics.text("H:{}  L:{}  Precip: {}%".format(today_hi, today_lo, today_precip), 20, 264, scale=2)
 
-    print("Display updated")
+    # Separator before 7-day strip
+    graphics.line(20, 295, WIDTH - 20, 295)
+
+    # 7-day forecast strip
+    col_w = (WIDTH - 20) // 7   # ~111px per column
+    strip_y = 300
+
+    for i in range(7):
+        cx = 10 + i * col_w
+        date   = weather["daily_dates"][i]
+        hi     = int(weather["daily_high"][i])
+        lo     = int(weather["daily_low"][i])
+        dcode  = weather["daily_code"][i]
+        precip = weather["daily_precip"][i]
+        label  = day_abbrev(date)
+        cond   = weather_description(dcode)
+
+        # Day name — bold for today (i==0)
+        if i == 0:
+            graphics.set_pen(PEN_BLUE)
+            label = "TODAY"
+        else:
+            graphics.set_pen(PEN_BLACK)
+        graphics.text(label, cx + 4, strip_y, scale=2)
+
+        # High / Low
+        graphics.set_pen(PEN_RED)
+        graphics.text("{}".format(hi), cx + 4, strip_y + 22, scale=2)
+        graphics.set_pen(PEN_BLACK)
+        graphics.text("/{}".format(lo), cx + 28, strip_y + 22, scale=2)
+
+        # Condition
+        graphics.set_pen(PEN_BLACK)
+        graphics.text(cond[:6], cx + 4, strip_y + 46, scale=1)
+
+        # Precip %
+        graphics.set_pen(PEN_BLUE)
+        graphics.text("{}%".format(precip), cx + 4, strip_y + 58, scale=1)
+
+        # Column divider
+        if i > 0:
+            graphics.set_pen(PEN_BLACK)
+            graphics.line(cx, strip_y - 2, cx, strip_y + 72)
+
+    graphics.line(20, 440, WIDTH - 20, 440)
+    graphics.set_pen(PEN_BLACK)
+    graphics.text("Press B for servers", 220, 455, scale=2)
+
+    print("Weather display updated")
     graphics.update()
 
 
@@ -345,7 +414,7 @@ if ensure_wifi():
 
     # Fetch initial data
     date_str, time_str, tz = local_now()
-    weather_data = get_simple_weather()
+    weather_data = fetch_weather()
     server_data = fetch_server_status()
 
     # Display weather first
@@ -362,7 +431,7 @@ if ensure_wifi():
             if not pressed_buttons["A"]:
                 print("Button A - Weather")
                 date_str, time_str, tz = local_now()
-                weather_data = get_simple_weather()
+                weather_data = fetch_weather()
                 draw_weather(weather_data, date_str, time_str, tz)
                 current_display = "weather"
                 last_weather_update = time.time()
@@ -388,7 +457,7 @@ if ensure_wifi():
             if current_time - last_weather_update >= UPDATE_INTERVAL:
                 print("Refreshing weather...")
                 date_str, time_str, tz = local_now()
-                weather_data = get_simple_weather()
+                weather_data = fetch_weather()
                 draw_weather(weather_data, date_str, time_str, tz)
                 last_weather_update = current_time
 
