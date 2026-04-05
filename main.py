@@ -377,8 +377,13 @@ def draw_node_card(x, y, w, h, node):
     bar_y = y + 130
     bar_w = w - 32
     bar_h = 20
+    # Black border
     graphics.set_pen(PEN_BLACK)
     graphics.rectangle(bar_x, bar_y, bar_w, bar_h)
+    # White background inside
+    graphics.set_pen(PEN_WHITE)
+    graphics.rectangle(bar_x + 2, bar_y + 2, bar_w - 4, bar_h - 4)
+    # Colored fill based on CPU %
     if cpu > 80:
         graphics.set_pen(PEN_RED)
     elif cpu > 50:
