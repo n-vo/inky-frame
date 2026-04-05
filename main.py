@@ -218,15 +218,16 @@ def draw_weather(weather, date_str, time_str, tz):
     graphics.set_pen(PEN_BLUE)
     graphics.text("{}F".format(int(temp)), 20, 80, scale=7)
 
+    # Right-side details aligned with the large temp block
     graphics.set_pen(PEN_BLACK)
-    graphics.text(desc, 20, 200, scale=3)
-    graphics.text("Wind: {} mph".format(int(wind)), 20, 238, scale=2)
+    graphics.text(desc, 350, 90, scale=3)
+    graphics.text("Wind: {} mph".format(int(wind)), 350, 130, scale=2)
 
     # Today high/low from daily[0]
     today_hi = int(weather["daily_high"][0])
     today_lo = int(weather["daily_low"][0])
     today_precip = weather["daily_precip"][0]
-    graphics.text("H:{}  L:{}  Precip: {}%".format(today_hi, today_lo, today_precip), 20, 264, scale=2)
+    graphics.text("H:{}  L:{}  Precip: {}%".format(today_hi, today_lo, today_precip), 350, 158, scale=2)
 
     # Separator before 7-day strip
     graphics.line(20, 295, WIDTH - 20, 295)
