@@ -192,7 +192,7 @@ def draw_weather(weather, date_str, time_str, tz):
     graphics.set_pen(PEN_BLACK)
 
     # Header
-    graphics.text("WEATHER STATION", 20, 10, scale=3)
+    graphics.text("WEATHER STATION", 20, 10, scale=4)
     graphics.text(
         "{}   {} {} {}".format(LOCATION_NAME, date_str, time_str, tz), 20, 42, scale=2
     )
