@@ -170,15 +170,15 @@ def fetch_weather():
         cw = raw["current_weather"]
         daily = raw["daily"]
         return {
-            "current_temp":      cw["temperature"],
-            "current_wind":      cw["windspeed"],
-            "current_code":      cw["weathercode"],
-            "current_is_day":    cw["is_day"],
-            "daily_dates":       daily["time"],
-            "daily_high":        daily["temperature_2m_max"],
-            "daily_low":         daily["temperature_2m_min"],
-            "daily_code":        daily["weathercode"],
-            "daily_precip":      daily["precipitation_probability_max"],
+            "current_temp": cw["temperature"],
+            "current_wind": cw["windspeed"],
+            "current_code": cw["weathercode"],
+            "current_is_day": cw["is_day"],
+            "daily_dates": daily["time"],
+            "daily_high": daily["temperature_2m_max"],
+            "daily_low": daily["temperature_2m_min"],
+            "daily_code": daily["weathercode"],
+            "daily_precip": daily["precipitation_probability_max"],
         }
     except Exception as e:
         print("Weather fetch failed: {}".format(e))
@@ -209,11 +209,11 @@ def draw_weather(weather, date_str, time_str, tz):
         return
 
     # Current conditions
-    temp   = weather["current_temp"]
-    wind   = weather["current_wind"]
-    code   = weather["current_code"]
+    temp = weather["current_temp"]
+    wind = weather["current_wind"]
+    code = weather["current_code"]
     is_day = weather["current_is_day"]
-    desc   = weather_description(code)
+    desc = weather_description(code)
 
     graphics.set_pen(PEN_BLUE)
     graphics.text("{}F".format(int(temp)), 20, 80, scale=7)
@@ -227,24 +227,30 @@ def draw_weather(weather, date_str, time_str, tz):
     today_hi = int(weather["daily_high"][0])
     today_lo = int(weather["daily_low"][0])
     today_precip = weather["daily_precip"][0]
-    graphics.text("H:{}  L:{}  Precip: {}%".format(today_hi, today_lo, today_precip), 350, 158, scale=2)
+    graphics.text(
+        "H:{}  L:{}  Precip: {}%".format(today_hi, today_lo, today_precip),
+        350,
+        158,
+        scale=2,
+    )
 
     # Separator before 7-day strip
-    graphics.line(20, 190, WIDTH - 20, 190)
+    separator_line_y = 220
+    graphics.line(20, separator_line_y, WIDTH - 20, separator_line_y)
 
     # 7-day forecast strip
-    col_w = (WIDTH - 20) // 7   # ~111px per column
-    strip_y = 196
+    col_w = (WIDTH - 20) // 7  # ~111px per column
+    strip_y = separator_line_y + 10
 
     for i in range(7):
         cx = 10 + i * col_w
-        date   = weather["daily_dates"][i]
-        hi     = int(weather["daily_high"][i])
-        lo     = int(weather["daily_low"][i])
-        dcode  = weather["daily_code"][i]
+        date = weather["daily_dates"][i]
+        hi = int(weather["daily_high"][i])
+        lo = int(weather["daily_low"][i])
+        dcode = weather["daily_code"][i]
         precip = weather["daily_precip"][i]
-        label  = day_abbrev(date)
-        cond   = weather_description(dcode)
+        label = day_abbrev(date)
+        cond = weather_description(dcode)
 
         # Day name — bold for today (i==0)
         if i == 0:
