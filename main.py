@@ -309,21 +309,19 @@ def draw_weather(weather, date_str, time_str, tz):
             graphics.line(cx, strip_y - 2, cx, strip_y + 72)
 
     # UV / Sunrise / Sunset info bar
-    uv   = weather.get("uv_index", 0)
-    rise = fmt_time_12h(weather.get("sunrise", "06:00"))
-    sset = fmt_time_12h(weather.get("sunset", "19:00"))
+    uv    = weather.get("uv_index", 0)
+    rise  = fmt_time_12h(weather.get("sunrise", "06:00"))
+    sset  = fmt_time_12h(weather.get("sunset", "19:00"))
     uvlbl = uv_label(uv)
 
-    graphics.line(20, 400, WIDTH - 20, 400)
-    graphics.set_pen(PEN_YELLOW)
-    graphics.text("UV: {} ({})".format(int(uv), uvlbl), 30, 412, scale=2)
+    graphics.line(20, 318, WIDTH - 20, 318)
     graphics.set_pen(PEN_BLACK)
-    graphics.text("Sunrise: {}".format(rise), 300, 412, scale=2)
-    graphics.text("Sunset: {}".format(sset), 560, 412, scale=2)
+    graphics.text("UV: {} ({})".format(int(uv), uvlbl), 30, 328, scale=2)
+    graphics.text("Sunrise: {}".format(rise), 300, 328, scale=2)
+    graphics.text("Sunset: {}".format(sset), 560, 328, scale=2)
 
-    graphics.line(20, 438, WIDTH - 20, 438)
-    graphics.set_pen(PEN_BLACK)
-    graphics.text("Press B for servers", 270, 450, scale=2)
+    graphics.line(20, 352, WIDTH - 20, 352)
+    graphics.text("Press B for servers", 270, 362, scale=2)
 
     print("Weather display updated")
     graphics.update()
