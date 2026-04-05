@@ -205,9 +205,9 @@ def fetch_weather():
             "daily_low": daily["temperature_2m_min"],
             "daily_code": daily["weathercode"],
             "daily_precip": daily["precipitation_probability_max"],
-            "uv_index":     daily["uv_index_max"][0],
-            "sunrise":      daily["sunrise"][0][11:16],
-            "sunset":       daily["sunset"][0][11:16],
+            "uv_index": daily["uv_index_max"][0],
+            "sunrise": daily["sunrise"][0][11:16],
+            "sunset": daily["sunset"][0][11:16],
         }
     except Exception as e:
         print("Weather fetch failed: {}".format(e))
@@ -264,7 +264,7 @@ def draw_weather(weather, date_str, time_str, tz):
     )
 
     # Separator before 7-day strip
-    separator_line_y = 220
+    separator_line_y = 210
     graphics.line(20, separator_line_y, WIDTH - 20, separator_line_y)
 
     # 7-day forecast strip
@@ -309,19 +309,20 @@ def draw_weather(weather, date_str, time_str, tz):
             graphics.line(cx, strip_y - 2, cx, strip_y + 72)
 
     # UV / Sunrise / Sunset info bar
-    uv    = weather.get("uv_index", 0)
-    rise  = fmt_time_12h(weather.get("sunrise", "06:00"))
-    sset  = fmt_time_12h(weather.get("sunset", "19:00"))
+    uv = weather.get("uv_index", 0)
+    rise = fmt_time_12h(weather.get("sunrise", "06:00"))
+    sset = fmt_time_12h(weather.get("sunset", "19:00"))
     uvlbl = uv_label(uv)
 
-    graphics.line(20, 318, WIDTH - 20, 318)
+    print(f"Strip y: {strip_y}")
+    extra_info_y = strip_y + 80  # 300
+    graphics.line(20, extra_info_y, WIDTH - 20, extra_info_y)
     graphics.set_pen(PEN_BLACK)
-    graphics.text("UV: {} ({})".format(int(uv), uvlbl), 30, 328, scale=2)
-    graphics.text("Sunrise: {}".format(rise), 300, 328, scale=2)
-    graphics.text("Sunset: {}".format(sset), 560, 328, scale=2)
-
-    graphics.line(20, 352, WIDTH - 20, 352)
-    graphics.text("Press B for servers", 270, 362, scale=2)
+    graphics.text("UV: {} ({})".format(int(uv), uvlbl), 30, extra_info_y + 20, scale=2)
+    graphics.text("Sunrise: {}".format(rise), 300, extra_info_y + 20, scale=2)
+    graphics.text("Sunset: {}".format(sset), 560, extra_info_y + 20, scale=2)
+    graphics.line(20, extra_info_y + 50, WIDTH - 20, extra_info_y + 50)
+    graphics.text("Press B for servers", 270, extra_info_y + 100, scale=2)
 
     print("Weather display updated")
     graphics.update()
