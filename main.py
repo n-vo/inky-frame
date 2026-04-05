@@ -230,11 +230,11 @@ def draw_weather(weather, date_str, time_str, tz):
     graphics.text("H:{}  L:{}  Precip: {}%".format(today_hi, today_lo, today_precip), 350, 158, scale=2)
 
     # Separator before 7-day strip
-    graphics.line(20, 295, WIDTH - 20, 295)
+    graphics.line(20, 190, WIDTH - 20, 190)
 
     # 7-day forecast strip
     col_w = (WIDTH - 20) // 7   # ~111px per column
-    strip_y = 300
+    strip_y = 196
 
     for i in range(7):
         cx = 10 + i * col_w
