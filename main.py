@@ -264,7 +264,7 @@ def draw_weather(weather, date_str, time_str, tz):
     )
 
     # Separator before 7-day strip
-    separator_line_y = 210
+    separator_line_y = 200
     graphics.line(20, separator_line_y, WIDTH - 20, separator_line_y)
 
     # 7-day forecast strip
