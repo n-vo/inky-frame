@@ -175,8 +175,29 @@ def day_abbrev(date_str):
     return ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"][wd]
 
 
+FETCH_TIMEOUT = 10  # seconds — covers both connect AND read
+
+
+def _get(url):
+    """
+    urequests.get wrapper that enforces a hard read timeout.
+    MicroPython urequests timeout= only covers TCP connect; once connected
+    the read blocks forever. We poke the underlying socket directly.
+    """
+    import usocket
+
+    r = urequests.get(url, timeout=FETCH_TIMEOUT)
+    # Grab the raw socket and set SO_TIMEOUT on it so reads also time out
+    try:
+        r.raw.settimeout(FETCH_TIMEOUT)
+    except Exception:
+        pass  # not all builds expose .raw; fall through, best-effort
+    return r
+
+
 def fetch_weather():
     """Fetch 7-day forecast from Open-Meteo (no API key required)"""
+    ensure_wifi()  # re-associate if link dropped while idle
     try:
         url = (
             "https://api.open-meteo.com/v1/forecast"
@@ -189,12 +210,13 @@ def fetch_weather():
             "&forecast_days=7"
         ).format(LATITUDE, LONGITUDE)
         print("Fetching weather...")
-        r = urequests.get(url, timeout=15)
+        r = _get(url)
         raw = r.json()
         r.close()
 
         cw = raw["current_weather"]
         daily = raw["daily"]
+        print("Weather fetched OK")
         return {
             "current_temp": cw["temperature"],
             "current_wind": cw["windspeed"],
@@ -214,18 +236,58 @@ def fetch_weather():
         return None
 
 
+def fetch_server_status():
+    """Fetch server status"""
+    ensure_wifi()  # re-associate if link dropped while idle
+    try:
+        print("Fetching server status...")
+        r = _get(secrets.STATUS_API_URL)
+        data = r.json()
+        r.close()
+        print("Server status fetched OK")
+        return data
+    except Exception as e:
+        print("Server fetch failed: {}".format(e))
+        return None
+
+
+# ─── Unified header ──────────────────────────────────────────────────────────
+
+
+def draw_header(title, subtitle):
+    """Black header bar used by both displays for visual consistency"""
+    graphics.set_pen(PEN_BLACK)
+    graphics.rectangle(0, 0, WIDTH, 68)
+    graphics.set_pen(PEN_WHITE)
+    graphics.text(title, 20, 8, scale=4)
+    graphics.text(subtitle, 20, 44, scale=2)
+
+
+# ─── Loading screen ──────────────────────────────────────────────────────────
+
+
+def draw_loading(title, message="Fetching data..."):
+    """Single-refresh loading screen shown while API call is in flight"""
+    graphics.set_pen(PEN_WHITE)
+    graphics.clear()
+    draw_header(title, "Please wait...")
+    graphics.set_pen(PEN_BLACK)
+    graphics.text(message, 200, 250, scale=4)
+    graphics.update()
+
+
+# ─── Weather display ─────────────────────────────────────────────────────────
+
+
 def draw_weather(weather, date_str, time_str, tz):
     """Render 7-day forecast dashboard"""
     graphics.set_pen(PEN_WHITE)
     graphics.clear()
-    graphics.set_pen(PEN_BLACK)
 
-    # Header
-    graphics.text("WEATHER STATION", 20, 10, scale=4)
-    graphics.text(
-        "{}   {} {} {}".format(LOCATION_NAME, date_str, time_str, tz), 20, 42, scale=2
+    draw_header(
+        "WEATHER STATION",
+        "{}   {} {} {}".format(LOCATION_NAME, date_str, time_str, tz),
     )
-    graphics.line(20, 66, WIDTH - 20, 66)
 
     if weather is None:
         graphics.set_pen(PEN_RED)
@@ -241,18 +303,15 @@ def draw_weather(weather, date_str, time_str, tz):
     temp = weather["current_temp"]
     wind = weather["current_wind"]
     code = weather["current_code"]
-    is_day = weather["current_is_day"]
     desc = weather_description(code)
 
     graphics.set_pen(PEN_BLUE)
     graphics.text("{}F".format(int(temp)), 20, 80, scale=7)
 
-    # Right-side details aligned with the large temp block
     graphics.set_pen(PEN_BLACK)
     graphics.text(desc, 350, 90, scale=3)
     graphics.text("Wind: {} mph".format(int(wind)), 350, 130, scale=2)
 
-    # Today high/low from daily[0]
     today_hi = int(weather["daily_high"][0])
     today_lo = int(weather["daily_low"][0])
     today_precip = weather["daily_precip"][0]
@@ -263,12 +322,11 @@ def draw_weather(weather, date_str, time_str, tz):
         scale=2,
     )
 
-    # Separator before 7-day strip
     separator_line_y = 200
     graphics.line(20, separator_line_y, WIDTH - 20, separator_line_y)
 
     # 7-day forecast strip
-    col_w = (WIDTH - 20) // 7  # ~111px per column
+    col_w = (WIDTH - 20) // 7
     strip_y = separator_line_y + 10
 
     for i in range(7):
@@ -281,7 +339,6 @@ def draw_weather(weather, date_str, time_str, tz):
         label = day_abbrev(date)
         cond = weather_description(dcode)
 
-        # Day name — bold for today (i==0)
         if i == 0:
             graphics.set_pen(PEN_BLUE)
             label = "TODAY"
@@ -289,33 +346,27 @@ def draw_weather(weather, date_str, time_str, tz):
             graphics.set_pen(PEN_BLACK)
         graphics.text(label, cx + 4, strip_y, scale=2)
 
-        # High / Low
         graphics.set_pen(PEN_RED)
         graphics.text("{}".format(hi), cx + 4, strip_y + 22, scale=2)
         graphics.set_pen(PEN_BLACK)
         graphics.text("/{}".format(lo), cx + 28, strip_y + 22, scale=2)
 
-        # Condition
         graphics.set_pen(PEN_BLACK)
         graphics.text(cond[:6], cx + 4, strip_y + 46, scale=1)
 
-        # Precip %
         graphics.set_pen(PEN_BLUE)
         graphics.text("{}%".format(precip), cx + 4, strip_y + 58, scale=1)
 
-        # Column divider
         if i > 0:
             graphics.set_pen(PEN_BLACK)
             graphics.line(cx, strip_y - 2, cx, strip_y + 72)
 
-    # UV / Sunrise / Sunset info bar
     uv = weather.get("uv_index", 0)
     rise = fmt_time_12h(weather.get("sunrise", "06:00"))
     sset = fmt_time_12h(weather.get("sunset", "19:00"))
     uvlbl = uv_label(uv)
 
-    # print(f"Strip y: {strip_y}")
-    extra_info_y = strip_y + 80  # 300
+    extra_info_y = strip_y + 80
     graphics.line(20, extra_info_y, WIDTH - 20, extra_info_y)
     graphics.set_pen(PEN_BLACK)
     graphics.text("UV: {} ({})".format(int(uv), uvlbl), 30, extra_info_y + 20, scale=2)
@@ -328,18 +379,7 @@ def draw_weather(weather, date_str, time_str, tz):
     graphics.update()
 
 
-def fetch_server_status():
-    """Fetch server status"""
-    try:
-        print("Fetching server status...")
-        response = urequests.get(secrets.STATUS_API_URL, timeout=15)
-        data = response.json()
-        response.close()
-        print("Server status fetched")
-        return data
-    except Exception as e:
-        print("Server error: {}".format(e))
-        return None
+# ─── Server display ───────────────────────────────────────────────────────────
 
 
 def draw_node_card(x, y, w, h, node):
@@ -349,73 +389,53 @@ def draw_node_card(x, y, w, h, node):
     load = node.get("load1", 0)
     name = node.get("name", "Unknown")
 
-    # Card background
     graphics.set_pen(PEN_WHITE)
     graphics.rectangle(x, y, w, h)
 
-    # Card border
     graphics.set_pen(PEN_BLACK)
     graphics.rectangle(x, y, w, 4)
 
-    # Node name
     graphics.set_pen(PEN_BLACK)
     graphics.text(name, x + 16, y + 20, scale=4)
 
-    # CPU
     graphics.set_pen(PEN_BLACK)
     graphics.text("CPU", x + 16, y + 90, scale=3)
-    if cpu > 80:
-        graphics.set_pen(PEN_RED)
-    elif cpu > 50:
-        graphics.set_pen(PEN_RED)
-    else:
-        graphics.set_pen(PEN_GREEN)
+    graphics.set_pen(PEN_RED if cpu > 50 else PEN_GREEN)
     graphics.text("{}%".format(int(cpu)), x + 120, y + 90, scale=3)
 
-    # CPU bar
     bar_x = x + 16
     bar_y = y + 130
     bar_w = w - 32
     bar_h = 20
-    # Black border
     graphics.set_pen(PEN_BLACK)
     graphics.rectangle(bar_x, bar_y, bar_w, bar_h)
-    # White background inside
     graphics.set_pen(PEN_WHITE)
     graphics.rectangle(bar_x + 2, bar_y + 2, bar_w - 4, bar_h - 4)
-    # Colored fill based on CPU %
-    if cpu > 80:
-        graphics.set_pen(PEN_RED)
-    elif cpu > 50:
-        graphics.set_pen(PEN_RED)
-    else:
-        graphics.set_pen(PEN_GREEN)
+    graphics.set_pen(PEN_RED if cpu > 50 else PEN_GREEN)
     bar_fill = int((bar_w - 4) * cpu / 100)
     if bar_fill > 0:
         graphics.rectangle(bar_x + 2, bar_y + 2, bar_fill, bar_h - 4)
 
-    # Temperature
     graphics.set_pen(PEN_BLACK)
     graphics.text("TEMP", x + 16, y + 175, scale=3)
-    if temp > 70:
-        graphics.set_pen(PEN_RED)
-    elif temp > 55:
-        graphics.set_pen(PEN_RED)
-    else:
-        graphics.set_pen(PEN_GREEN)
+    graphics.set_pen(PEN_RED if temp > 55 else PEN_GREEN)
     graphics.text("{}C".format(int(temp)), x + 140, y + 175, scale=3)
 
-    # Load
     graphics.set_pen(PEN_BLACK)
     graphics.text("LOAD", x + 16, y + 220, scale=3)
     graphics.set_pen(PEN_BLUE)
     graphics.text(str(round(load, 2)), x + 140, y + 220, scale=3)
 
 
-def draw_server_status(data):
+def draw_server_status(data, date_str, time_str, tz):
     """Draw server status with node cards"""
     graphics.set_pen(PEN_WHITE)
     graphics.clear()
+
+    draw_header(
+        "CLUSTER STATUS",
+        "{}   {} {} {}".format(LOCATION_NAME, date_str, time_str, tz),
+    )
 
     if data is None:
         graphics.set_pen(PEN_RED)
@@ -427,37 +447,26 @@ def draw_server_status(data):
         graphics.update()
         return
 
-    # Header
-    graphics.set_pen(PEN_BLACK)
-    graphics.rectangle(0, 0, WIDTH, 52)
-    graphics.set_pen(PEN_WHITE)
-    graphics.text("CLUSTER STATUS", 20, 12, scale=4)
-
-    # Timestamp
-    updated = data.get("updated", "")[:16]
-    graphics.set_pen(PEN_YELLOW)
-    graphics.text(updated, WIDTH - 300, 18, scale=2)
-
-    # Node cards side by side
     nodes = data.get("nodes", [])
     card_w = (WIDTH - 48) // 2
-    card_h = HEIGHT - 52 - 16
-    card_y = 60
+    card_h = HEIGHT - 68 - 40  # leave room at bottom for nav hint
+    card_y = 76  # just below unified header
 
     for i in range(min(2, len(nodes))):
         node = nodes[i]
         card_x = 16 + i * (card_w + 16)
         draw_node_card(card_x, card_y, card_w, card_h, node)
 
-    # Divider
     graphics.set_pen(PEN_BLACK)
-    graphics.rectangle(WIDTH // 2 - 1, 60, 2, card_h)
+    graphics.rectangle(WIDTH // 2 - 1, card_y, 2, card_h)
 
     graphics.set_pen(PEN_BLACK)
     graphics.text("Press A for weather", 220, HEIGHT - 20, scale=2)
 
     graphics.update()
 
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
 print("=== Unified Dashboard ===")
 
@@ -479,32 +488,41 @@ if ensure_wifi():
     print("Dashboard ready. Press buttons to switch displays.")
 
     while True:
-        # Check button A
+        # Button A — blink LED, fetch, one single display update
         if inky_frame.button_a.read():
             if not pressed_buttons["A"]:
                 print("Button A - Weather")
+                _led.off()
+                new_data = fetch_weather()
+                if new_data is not None:
+                    weather_data = new_data
                 date_str, time_str, tz = local_now()
-                weather_data = fetch_weather()
                 draw_weather(weather_data, date_str, time_str, tz)
                 current_display = "weather"
                 last_weather_update = time.time()
+                _led.on()
                 pressed_buttons["A"] = True
         else:
             pressed_buttons["A"] = False
 
-        # Check button B
+        # Button B — blink LED, fetch, one single display update
         if inky_frame.button_b.read():
             if not pressed_buttons["B"]:
                 print("Button B - Servers")
-                server_data = fetch_server_status()
-                draw_server_status(server_data)
+                _led.off()
+                new_data = fetch_server_status()
+                if new_data is not None:
+                    server_data = new_data
+                date_str, time_str, tz = local_now()
+                draw_server_status(server_data, date_str, time_str, tz)
                 current_display = "server"
                 last_server_update = time.time()
+                _led.on()
                 pressed_buttons["B"] = True
         else:
             pressed_buttons["B"] = False
 
-        # Refresh weather every 30 minutes if displayed
+        # Auto-refresh weather every 30 minutes if displayed
         if current_display == "weather":
             current_time = time.time()
             if current_time - last_weather_update >= UPDATE_INTERVAL:
@@ -514,13 +532,14 @@ if ensure_wifi():
                 draw_weather(weather_data, date_str, time_str, tz)
                 last_weather_update = current_time
 
-        # Refresh server data every 5 minutes if displayed
+        # Auto-refresh server data every 5 minutes if displayed
         if current_display == "server":
             current_time = time.time()
             if current_time - last_server_update >= 300:
                 print("Refreshing server data...")
+                date_str, time_str, tz = local_now()
                 server_data = fetch_server_status()
-                draw_server_status(server_data)
+                draw_server_status(server_data, date_str, time_str, tz)
                 last_server_update = current_time
 
         time.sleep(0.1)
