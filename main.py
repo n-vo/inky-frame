@@ -467,81 +467,147 @@ def draw_server_status(data, date_str, time_str, tz):
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
+# Power model: wake → identify reason → WiFi on → fetch → draw → WiFi off → sleep
+# Between sleeps: ~2µA (RTC only). WiFi active only during fetch (~80mA, ~5-10s).
+# Buttons A/B wake via hardware. RTC timer wakes for auto-refresh.
+
+# Auto-refresh intervals (seconds)
+WEATHER_REFRESH = 1800  # 30 min
+SERVER_REFRESH = 300  # 5 min
+
+# Persistent state across wake cycles lives in RTC memory (56 bytes, survives sleep)
+# Layout: [display_mode, last_weather_wake, last_server_wake]
+# display_mode: 0=weather, 1=server
+rtc = machine.RTC()
+
+
+def _rtc_read():
+    """Read persistent state from RTC memory"""
+    try:
+        mem = rtc.memory()
+        if len(mem) >= 9 and mem[0] == 0xAB:  # magic byte = valid
+            mode = mem[1]
+            # 4-byte little-endian ints for timestamps
+            lw = mem[2] | (mem[3] << 8) | (mem[4] << 16) | (mem[5] << 24)
+            ls = mem[6] | (mem[7] << 8) | (mem[8] << 16) | (mem[9] << 24)
+            return mode, lw, ls
+    except Exception:
+        pass
+    return 0, 0, 0  # defaults: weather mode, never updated
+
+
+def _rtc_write(mode, last_weather, last_server):
+    """Write persistent state to RTC memory"""
+    try:
+        lw = last_weather & 0xFFFFFFFF
+        ls = last_server & 0xFFFFFFFF
+        mem = bytes(
+            [
+                0xAB,
+                mode,
+                lw & 0xFF,
+                (lw >> 8) & 0xFF,
+                (lw >> 16) & 0xFF,
+                (lw >> 24) & 0xFF,
+                ls & 0xFF,
+                (ls >> 8) & 0xFF,
+                (ls >> 16) & 0xFF,
+                (ls >> 24) & 0xFF,
+            ]
+        )
+        rtc.memory(mem)
+    except Exception as e:
+        print("RTC write failed: {}".format(e))
+
+
+def wifi_off():
+    """Disconnect and power down WiFi radio"""
+    try:
+        wlan = network.WLAN(network.STA_IF)
+        wlan.disconnect()
+        wlan.active(False)
+        print("WiFi off")
+    except Exception as e:
+        print("WiFi off failed: {}".format(e))
+
+
+def go_to_sleep(seconds):
+    """Power off WiFi, LED, then deep sleep for given seconds.
+    Buttons A/B are wired to wake pins on the Inky Frame hardware.
+    """
+    print("Sleeping {}s ...".format(seconds))
+    _led.off()
+    wifi_off()
+
+    # Schedule RTC wake
+    inky_frame.sleep_for(seconds // 60)  # sleep_for takes minutes
+
+    # Release power latch — board powers off here if on battery.
+    # On USB power the Pico stays on but sleeps.
+    _pwr.value(0)
+
+    # Fallback: if USB powered (pwr latch ignored), use machine sleep
+    machine.lightsleep(seconds * 1000)
+
 
 print("=== Unified Dashboard ===")
 
-if ensure_wifi():
-    print("Syncing time...")
+# --- Identify wake reason ---
+wake_a = inky_frame.button_a.read()
+wake_b = inky_frame.button_b.read()
+wake_timer = not (wake_a or wake_b)  # no button = timer or first boot
+
+print("Wake: A={} B={} timer={}".format(wake_a, wake_b, wake_timer))
+
+# --- Load persistent state ---
+display_mode, last_weather, last_server = _rtc_read()
+print("State: mode={} lw={} ls={}".format(display_mode, last_weather, last_server))
+
+# --- Connect WiFi ---
+if not ensure_wifi():
+    print("WiFi failed — sleeping 60s")
+    go_to_sleep(60)
+
+# --- Sync NTP on first boot (timestamps = 0) ---
+if last_weather == 0:
     sync_ntp()
 
-    # Fetch initial data
-    date_str, time_str, tz = local_now()
+now = time.time()
+
+# --- Determine what to fetch and display ---
+if wake_a:
+    # Button A → always show weather with fresh data
+    display_mode = 0
+    _led.off()
     weather_data = fetch_weather()
-    server_data = fetch_server_status()
-
-    # Display weather first
+    date_str, time_str, tz = local_now()
     draw_weather(weather_data, date_str, time_str, tz)
-    current_display = "weather"
-    last_weather_update = time.time()
-    last_server_update = time.time()
+    last_weather = time.time()
 
-    print("Dashboard ready. Press buttons to switch displays.")
+elif wake_b:
+    # Button B → always show server with fresh data
+    display_mode = 1
+    _led.off()
+    server_data = fetch_server_status()
+    date_str, time_str, tz = local_now()
+    draw_server_status(server_data, date_str, time_str, tz)
+    last_server = time.time()
 
-    while True:
-        # Button A — blink LED, fetch, one single display update
-        if inky_frame.button_a.read():
-            if not pressed_buttons["A"]:
-                print("Button A - Weather")
-                _led.off()
-                new_data = fetch_weather()
-                if new_data is not None:
-                    weather_data = new_data
-                date_str, time_str, tz = local_now()
-                draw_weather(weather_data, date_str, time_str, tz)
-                current_display = "weather"
-                last_weather_update = time.time()
-                _led.on()
-                pressed_buttons["A"] = True
-        else:
-            pressed_buttons["A"] = False
-
-        # Button B — blink LED, fetch, one single display update
-        if inky_frame.button_b.read():
-            if not pressed_buttons["B"]:
-                print("Button B - Servers")
-                _led.off()
-                new_data = fetch_server_status()
-                if new_data is not None:
-                    server_data = new_data
-                date_str, time_str, tz = local_now()
-                draw_server_status(server_data, date_str, time_str, tz)
-                current_display = "server"
-                last_server_update = time.time()
-                _led.on()
-                pressed_buttons["B"] = True
-        else:
-            pressed_buttons["B"] = False
-
-        # Auto-refresh weather every 30 minutes if displayed
-        if current_display == "weather":
-            current_time = time.time()
-            if current_time - last_weather_update >= UPDATE_INTERVAL:
-                print("Refreshing weather...")
-                date_str, time_str, tz = local_now()
-                weather_data = fetch_weather()
-                draw_weather(weather_data, date_str, time_str, tz)
-                last_weather_update = current_time
-
-        # Auto-refresh server data every 5 minutes if displayed
-        if current_display == "server":
-            current_time = time.time()
-            if current_time - last_server_update >= 300:
-                print("Refreshing server data...")
-                date_str, time_str, tz = local_now()
-                server_data = fetch_server_status()
-                draw_server_status(server_data, date_str, time_str, tz)
-                last_server_update = current_time
-
-        time.sleep(0.1)
 else:
-    print("WiFi failed")
+    # Timer wake or first boot → refresh whichever display is active if due
+    date_str, time_str, tz = local_now()
+    if display_mode == 0:
+        weather_data = fetch_weather()
+        draw_weather(weather_data, date_str, time_str, tz)
+        last_weather = time.time()
+    else:
+        server_data = fetch_server_status()
+        draw_server_status(server_data, date_str, time_str, tz)
+        last_server = time.time()
+
+# --- Save state ---
+_rtc_write(display_mode, last_weather, last_server)
+
+# --- Sleep until next refresh ---
+next_refresh = SERVER_REFRESH if display_mode == 1 else WEATHER_REFRESH
+go_to_sleep(next_refresh)
