@@ -1,7 +1,18 @@
 """
-Unified Dashboard - Pimoroni Inky Frame 7.3" (Pico W)
-Button A: Weather Station
-Button B: Server Status
+Photo Slideshow - Pimoroni Inky Frame 7.3" (Pico W)
+
+Shows one random photo per wake cycle from a microSD card, then deep-sleeps.
+E-paper keeps the image on screen with zero power, so battery life is great.
+
+Buttons:
+  A -> new random photo
+  B -> new random photo
+  (timer wake also picks a new random photo automatically)
+
+Photo prep (IMPORTANT):
+  * Format: JPG, BASELINE (not progressive), resized to 800x480.
+  * Copy them into a folder called /photos on the microSD card.
+  * Progressive JPEGs will NOT decode -- re-save as baseline if unsure.
 """
 
 # Power latch - MUST be first
@@ -13,601 +24,211 @@ _pwr.value(1)
 _led = machine.Pin("LED", machine.Pin.OUT)
 _led.on()
 
-# All imports
-import network
-import urequests
+import gc
+import os
+import random
 import time
-import ntptime
+from machine import Pin, SPI
+import sdcard
+import uos
+import jpegdec
 from picographics import PicoGraphics, DISPLAY_INKY_FRAME_7 as DISPLAY
 import inky_frame
-import secrets
 
 # Hardware
 graphics = PicoGraphics(display=DISPLAY)
 WIDTH, HEIGHT = graphics.get_bounds()
 
-# Colors
+# Colors (used only for the "no photos" fallback screen)
 PEN_WHITE = 1
 PEN_BLACK = 0
-PEN_BLUE = 3
 PEN_RED = 4
-PEN_GREEN = 2
-PEN_YELLOW = 5
 
 # Config
-LATITUDE = 29.6196
-LONGITUDE = -95.6345
-LOCATION_NAME = "Sugar Land, TX"
-WEATHER_API = "https://api.open-meteo.com/v1/forecast"
-
-UPDATE_INTERVAL = 1800  # 30 minutes
-
-# State
-current_display = "weather"
-pressed_buttons = {"A": False, "B": False}
-
-
-def ensure_wifi(retries=3):
-    """Connect to WiFi"""
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-
-    if wlan.isconnected():
-        return True
-
-    for attempt in range(1, retries + 1):
-        print("WiFi attempt {}/{}...".format(attempt, retries))
-        wlan.connect(secrets.WIFI_SSID, secrets.WIFI_PASSWORD)
-        timeout = 20
-        while not wlan.isconnected() and timeout > 0:
-            time.sleep(1)
-            timeout = timeout - 1
-        if wlan.isconnected():
-            print("WiFi connected: {}".format(wlan.ifconfig()[0]))
-            return True
-        wlan.disconnect()
-        time.sleep(2)
-
-    print("WiFi failed")
-    return False
-
-
-def sync_ntp():
-    """Sync time via NTP"""
-    try:
-        ntptime.settime()
-        print("NTP synced")
-    except Exception as e:
-        print("NTP failed: {}".format(e))
-
-
-def _dst_offset_seconds(utc_tt):
-    """Return UTC offset in seconds for US Central Time"""
-    year = utc_tt[0]
-    month = utc_tt[1]
-    mday = utc_tt[2]
-    hour = utc_tt[3]
-
-    def nth_sunday(y, m, n):
-        first_wd = time.localtime(int(time.mktime((y, m, 1, 0, 0, 0, 0, 0))))[6]
-        days_to_sun = (6 - first_wd) % 7
-        return 1 + days_to_sun + (n - 1) * 7
-
-    dst_start = nth_sunday(year, 3, 2)
-    dst_end = nth_sunday(year, 11, 1)
-
-    in_dst = False
-    if month > 3 and month < 11:
-        in_dst = True
-    elif month == 3 and (mday > dst_start or (mday == dst_start and hour >= 8)):
-        in_dst = True
-    elif month == 11 and not (mday > dst_end or (mday == dst_end and hour >= 7)):
-        in_dst = True
-
-    return -18000 if in_dst else -21600
-
-
-def local_now():
-    """Return (date_str, time_str, tz_label) in Central Time"""
-    utc_tt = time.gmtime()
-    offset = _dst_offset_seconds(utc_tt)
-    local_t = time.time() + offset
-    l = time.localtime(local_t)
-    tz = "CDT" if offset == -18000 else "CST"
-    date_str = "{:04d}-{:02d}-{:02d}".format(l[0], l[1], l[2])
-    hour = l[3]
-    ampm = "AM" if hour < 12 else "PM"
-    hour12 = hour % 12 or 12
-    time_str = "{}:{:02d} {}".format(hour12, l[4], ampm)
-    return date_str, time_str, tz
-
-
-def fmt_time_12h(hhmm):
-    """Convert 'HH:MM' 24h string to '12:34 AM' format"""
-    h, m = int(hhmm[:2]), int(hhmm[3:5])
-    ampm = "AM" if h < 12 else "PM"
-    h12 = h % 12 or 12
-    return "{}:{:02d} {}".format(h12, m, ampm)
-
-
-def uv_label(uv):
-    """Return UV risk label"""
-    uv = int(uv)
-    if uv <= 2:
-        return "Low"
-    elif uv <= 5:
-        return "Moderate"
-    elif uv <= 7:
-        return "High"
-    elif uv <= 10:
-        return "Very High"
-    else:
-        return "Extreme"
-
-
-def weather_description(code):
-    """Get short condition label from WMO code"""
-    if code == 0:
-        return "Clear"
-    elif code in [1, 2]:
-        return "Pt Cloudy"
-    elif code == 3:
-        return "Overcast"
-    elif code in [45, 48]:
-        return "Foggy"
-    elif code in [51, 53, 55, 61, 63, 65, 80, 81, 82]:
-        return "Rain"
-    elif code in [71, 73, 75, 77, 85, 86]:
-        return "Snow"
-    elif code in [95, 96, 99]:
-        return "Tstorm"
-    else:
-        return "Unknown"
-
-
-def day_abbrev(date_str):
-    """Return 3-letter weekday from YYYY-MM-DD string"""
-    y = int(date_str[:4])
-    m = int(date_str[5:7])
-    d = int(date_str[8:10])
-    t = time.mktime((y, m, d, 0, 0, 0, 0, 0))
-    wd = time.localtime(t)[6]  # 0=Mon, 6=Sun
-    return ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"][wd]
-
-
-FETCH_TIMEOUT = 10  # seconds — covers both connect AND read
-
-
-def _get(url):
-    """
-    urequests.get wrapper that enforces a hard read timeout.
-    MicroPython urequests timeout= only covers TCP connect; once connected
-    the read blocks forever. We poke the underlying socket directly.
-    """
-    import usocket
-
-    r = urequests.get(url, timeout=FETCH_TIMEOUT)
-    # Grab the raw socket and set SO_TIMEOUT on it so reads also time out
-    try:
-        r.raw.settimeout(FETCH_TIMEOUT)
-    except Exception:
-        pass  # not all builds expose .raw; fall through, best-effort
-    return r
-
-
-def fetch_weather():
-    """Fetch 7-day forecast from Open-Meteo (no API key required)"""
-    ensure_wifi()  # re-associate if link dropped while idle
-    try:
-        url = (
-            "https://api.open-meteo.com/v1/forecast"
-            "?latitude={}&longitude={}"
-            "&current_weather=true"
-            "&daily=temperature_2m_max,temperature_2m_min,weathercode,precipitation_probability_max,uv_index_max,sunrise,sunset"
-            "&temperature_unit=fahrenheit"
-            "&wind_speed_unit=mph"
-            "&timezone=America%2FChicago"
-            "&forecast_days=7"
-        ).format(LATITUDE, LONGITUDE)
-        print("Fetching weather...")
-        r = _get(url)
-        raw = r.json()
-        r.close()
-
-        cw = raw["current_weather"]
-        daily = raw["daily"]
-        print("Weather fetched OK")
-        return {
-            "current_temp": cw["temperature"],
-            "current_wind": cw["windspeed"],
-            "current_code": cw["weathercode"],
-            "current_is_day": cw["is_day"],
-            "daily_dates": daily["time"],
-            "daily_high": daily["temperature_2m_max"],
-            "daily_low": daily["temperature_2m_min"],
-            "daily_code": daily["weathercode"],
-            "daily_precip": daily["precipitation_probability_max"],
-            "uv_index": daily["uv_index_max"][0],
-            "sunrise": daily["sunrise"][0][11:16],
-            "sunset": daily["sunset"][0][11:16],
-        }
-    except Exception as e:
-        print("Weather fetch failed: {}".format(e))
-        return None
-
-
-def fetch_server_status():
-    """Fetch server status"""
-    ensure_wifi()  # re-associate if link dropped while idle
-    try:
-        print("Fetching server status...")
-        r = _get(secrets.STATUS_API_URL)
-        data = r.json()
-        r.close()
-        print("Server status fetched OK")
-        return data
-    except Exception as e:
-        print("Server fetch failed: {}".format(e))
-        return None
-
-
-# ─── Unified header ──────────────────────────────────────────────────────────
-
-
-def draw_header(title, subtitle):
-    """Black header bar used by both displays for visual consistency"""
-    graphics.set_pen(PEN_BLACK)
-    graphics.rectangle(0, 0, WIDTH, 68)
-    graphics.set_pen(PEN_WHITE)
-    graphics.text(title, 20, 8, scale=4)
-    graphics.text(subtitle, 20, 44, scale=2)
-
-
-# ─── Loading screen ──────────────────────────────────────────────────────────
-
-
-def draw_loading(title, message="Fetching data..."):
-    """Single-refresh loading screen shown while API call is in flight"""
-    graphics.set_pen(PEN_WHITE)
-    graphics.clear()
-    draw_header(title, "Please wait...")
-    graphics.set_pen(PEN_BLACK)
-    graphics.text(message, 200, 250, scale=4)
-    graphics.update()
-
-
-# ─── Weather display ─────────────────────────────────────────────────────────
-
-
-def draw_weather(weather, date_str, time_str, tz):
-    """Render 7-day forecast dashboard"""
-    graphics.set_pen(PEN_WHITE)
-    graphics.clear()
-
-    draw_header(
-        "WEATHER STATION",
-        "{}   {} {} {}".format(LOCATION_NAME, date_str, time_str, tz),
-    )
-
-    if weather is None:
-        graphics.set_pen(PEN_RED)
-        graphics.text("ERROR", 200, 200, scale=6)
-        graphics.set_pen(PEN_BLACK)
-        graphics.text("Could not fetch weather data", 80, 320, scale=2)
-        graphics.line(20, 440, WIDTH - 20, 440)
-        graphics.text("Press B for servers", 220, 455, scale=2)
-        graphics.update()
-        return
-
-    # Current conditions
-    temp = weather["current_temp"]
-    wind = weather["current_wind"]
-    code = weather["current_code"]
-    desc = weather_description(code)
-
-    graphics.set_pen(PEN_BLUE)
-    graphics.text("{}F".format(int(temp)), 20, 80, scale=7)
-
-    graphics.set_pen(PEN_BLACK)
-    graphics.text(desc, 350, 90, scale=3)
-    graphics.text("Wind: {} mph".format(int(wind)), 350, 130, scale=2)
-
-    today_hi = int(weather["daily_high"][0])
-    today_lo = int(weather["daily_low"][0])
-    today_precip = weather["daily_precip"][0]
-    graphics.text(
-        "H:{}  L:{}  Precip: {}%".format(today_hi, today_lo, today_precip),
-        350,
-        158,
-        scale=2,
-    )
-
-    separator_line_y = 200
-    graphics.line(20, separator_line_y, WIDTH - 20, separator_line_y)
-
-    # 7-day forecast strip
-    col_w = (WIDTH - 20) // 7
-    strip_y = separator_line_y + 10
-
-    for i in range(7):
-        cx = 10 + i * col_w
-        date = weather["daily_dates"][i]
-        hi = int(weather["daily_high"][i])
-        lo = int(weather["daily_low"][i])
-        dcode = weather["daily_code"][i]
-        precip = weather["daily_precip"][i]
-        label = day_abbrev(date)
-        cond = weather_description(dcode)
-
-        if i == 0:
-            graphics.set_pen(PEN_BLUE)
-            label = "TODAY"
-        else:
-            graphics.set_pen(PEN_BLACK)
-        graphics.text(label, cx + 4, strip_y, scale=2)
-
-        graphics.set_pen(PEN_RED)
-        graphics.text("{}".format(hi), cx + 4, strip_y + 22, scale=2)
-        graphics.set_pen(PEN_BLACK)
-        graphics.text("/{}".format(lo), cx + 28, strip_y + 22, scale=2)
-
-        graphics.set_pen(PEN_BLACK)
-        graphics.text(cond[:6], cx + 4, strip_y + 46, scale=1)
-
-        graphics.set_pen(PEN_BLUE)
-        graphics.text("{}%".format(precip), cx + 4, strip_y + 58, scale=1)
-
-        if i > 0:
-            graphics.set_pen(PEN_BLACK)
-            graphics.line(cx, strip_y - 2, cx, strip_y + 72)
-
-    uv = weather.get("uv_index", 0)
-    rise = fmt_time_12h(weather.get("sunrise", "06:00"))
-    sset = fmt_time_12h(weather.get("sunset", "19:00"))
-    uvlbl = uv_label(uv)
-
-    extra_info_y = strip_y + 80
-    graphics.line(20, extra_info_y, WIDTH - 20, extra_info_y)
-    graphics.set_pen(PEN_BLACK)
-    graphics.text("UV: {} ({})".format(int(uv), uvlbl), 30, extra_info_y + 20, scale=2)
-    graphics.text("Sunrise: {}".format(rise), 300, extra_info_y + 20, scale=2)
-    graphics.text("Sunset: {}".format(sset), 560, extra_info_y + 20, scale=2)
-    graphics.line(20, extra_info_y + 50, WIDTH - 20, extra_info_y + 50)
-    graphics.text("Press B for servers", 270, extra_info_y + 100, scale=2)
-
-    print("Weather display updated")
-    graphics.update()
-
-
-# ─── Server display ───────────────────────────────────────────────────────────
-
-
-def draw_node_card(x, y, w, h, node):
-    """Draw a node status card"""
-    cpu = node.get("cpu_pct", 0)
-    temp = node.get("temp_c", 0)
-    load = node.get("load1", 0)
-    name = node.get("name", "Unknown")
-
-    graphics.set_pen(PEN_WHITE)
-    graphics.rectangle(x, y, w, h)
-
-    graphics.set_pen(PEN_BLACK)
-    graphics.rectangle(x, y, w, 4)
-
-    graphics.set_pen(PEN_BLACK)
-    graphics.text(name, x + 16, y + 20, scale=4)
-
-    graphics.set_pen(PEN_BLACK)
-    graphics.text("CPU", x + 16, y + 90, scale=3)
-    graphics.set_pen(PEN_RED if cpu > 50 else PEN_GREEN)
-    graphics.text("{}%".format(int(cpu)), x + 120, y + 90, scale=3)
-
-    bar_x = x + 16
-    bar_y = y + 130
-    bar_w = w - 32
-    bar_h = 20
-    graphics.set_pen(PEN_BLACK)
-    graphics.rectangle(bar_x, bar_y, bar_w, bar_h)
-    graphics.set_pen(PEN_WHITE)
-    graphics.rectangle(bar_x + 2, bar_y + 2, bar_w - 4, bar_h - 4)
-    graphics.set_pen(PEN_RED if cpu > 50 else PEN_GREEN)
-    bar_fill = int((bar_w - 4) * cpu / 100)
-    if bar_fill > 0:
-        graphics.rectangle(bar_x + 2, bar_y + 2, bar_fill, bar_h - 4)
-
-    graphics.set_pen(PEN_BLACK)
-    graphics.text("TEMP", x + 16, y + 175, scale=3)
-    graphics.set_pen(PEN_RED if temp > 55 else PEN_GREEN)
-    graphics.text("{}C".format(int(temp)), x + 140, y + 175, scale=3)
-
-    graphics.set_pen(PEN_BLACK)
-    graphics.text("LOAD", x + 16, y + 220, scale=3)
-    graphics.set_pen(PEN_BLUE)
-    graphics.text(str(round(load, 2)), x + 140, y + 220, scale=3)
-
-
-def draw_server_status(data, date_str, time_str, tz):
-    """Draw server status with node cards"""
-    graphics.set_pen(PEN_WHITE)
-    graphics.clear()
-
-    draw_header(
-        "CLUSTER STATUS",
-        "{}   {} {} {}".format(LOCATION_NAME, date_str, time_str, tz),
-    )
-
-    if data is None:
-        graphics.set_pen(PEN_RED)
-        graphics.text("ERROR", 200, 300, scale=6)
-        graphics.set_pen(PEN_BLACK)
-        graphics.text("API unreachable", 100, 380, scale=2)
-        graphics.line(40, 420, WIDTH - 40, 420)
-        graphics.text("Press A for weather", 220, 440, scale=2)
-        graphics.update()
-        return
-
-    nodes = data.get("nodes", [])
-    card_w = (WIDTH - 48) // 2
-    card_h = HEIGHT - 68 - 40  # leave room at bottom for nav hint
-    card_y = 76  # just below unified header
-
-    for i in range(min(2, len(nodes))):
-        node = nodes[i]
-        card_x = 16 + i * (card_w + 16)
-        draw_node_card(card_x, card_y, card_w, card_h, node)
-
-    graphics.set_pen(PEN_BLACK)
-    graphics.rectangle(WIDTH // 2 - 1, card_y, 2, card_h)
-
-    graphics.set_pen(PEN_BLACK)
-    graphics.text("Press A for weather", 220, HEIGHT - 20, scale=2)
-
-    graphics.update()
-
-
-# ─── Main ─────────────────────────────────────────────────────────────────────
-# Power model: wake → identify reason → WiFi on → fetch → draw → WiFi off → sleep
-# Between sleeps: ~2µA (RTC only). WiFi active only during fetch (~80mA, ~5-10s).
-# Buttons A/B wake via hardware. RTC timer wakes for auto-refresh.
-
-# Auto-refresh intervals (seconds)
-WEATHER_REFRESH = 1800  # 30 min
-SERVER_REFRESH = 300  # 5 min
-
-# Persistent state across wake cycles lives in RTC memory (56 bytes, survives sleep)
-# Layout: [display_mode, last_weather_wake, last_server_wake]
-# display_mode: 0=weather, 1=server
+PHOTO_DIR = "/sd/photos"       # folder on the SD card holding the JPGs
+SLIDESHOW_INTERVAL = 86400     # seconds between auto-advances (24 hours)
+
+# Persistent state across deep sleeps lives in RTC memory (survives power-off).
+# Layout: [magic=0xAB, index_low, index_high]
 rtc = machine.RTC()
 
 
-def _rtc_read():
-    """Read persistent state from RTC memory"""
+def mount_sd():
+    """Mount the microSD card at /sd. Returns True on success."""
+    try:
+        sd_spi = SPI(
+            0,
+            sck=Pin(18, Pin.OUT),
+            mosi=Pin(19, Pin.OUT),
+            miso=Pin(16, Pin.OUT),
+        )
+        sd = sdcard.SDCard(sd_spi, Pin(22))
+        uos.mount(sd, "/sd")
+        print("SD card mounted")
+        return True
+    except Exception as e:
+        print("SD mount failed: {}".format(e))
+        return False
+
+
+def _is_photo_name(name):
+    if name.startswith("._") or name.startswith("."):
+        return False  # skip macOS AppleDouble metadata files and hidden files
+    lower = name.lower()
+    return lower.endswith(".jpg") or lower.endswith(".jpeg")
+
+
+def _name_hash(name):
+    """Cheap 16-bit hash so RTC memory only needs 2 bytes to remember
+    the previously-shown filename (not the whole string)."""
+    h = 0
+    for ch in name:
+        h = (h * 31 + ord(ch)) & 0xFFFF
+    return h
+
+
+def pick_random_photo(avoid_hash):
+    """Reservoir-sample a random photo filename from PHOTO_DIR.
+
+    Deliberately avoids os.listdir(), which builds the full directory
+    listing in memory at once -- with hundreds of photos on the card that
+    exhausts the RP2040's free heap (most of it already used by the 800x480
+    framebuffer) and raises MemoryError. os.ilistdir() streams entries one
+    at a time instead, so memory use stays constant no matter how many
+    photos are on the card.
+    """
+    try:
+        entries = os.ilistdir(PHOTO_DIR)
+    except Exception as e:
+        print("Cannot read {}: {}".format(PHOTO_DIR, e))
+        return None, 0
+
+    count = 0
+    reservoir = [None, None]  # 2 candidates, so we can dodge an immediate repeat
+    for entry in entries:
+        name = entry[0]
+        if not _is_photo_name(name):
+            continue
+        count += 1
+        if count <= 2:
+            reservoir[count - 1] = name
+        else:
+            j = random.randrange(count)
+            if j < 2:
+                reservoir[j] = name
+
+    print("Found {} photo(s)".format(count))
+    if count == 0:
+        return None, 0
+
+    chosen = reservoir[0]
+    if reservoir[1] is not None and _name_hash(chosen) == avoid_hash:
+        chosen = reservoir[1]
+
+    return "{}/{}".format(PHOTO_DIR, chosen), _name_hash(chosen)
+
+
+def _rtc_read_hash():
+    """Read the previously-shown photo's name hash from RTC memory."""
     try:
         mem = rtc.memory()
-        if len(mem) >= 9 and mem[0] == 0xAB:  # magic byte = valid
-            mode = mem[1]
-            # 4-byte little-endian ints for timestamps
-            lw = mem[2] | (mem[3] << 8) | (mem[4] << 16) | (mem[5] << 24)
-            ls = mem[6] | (mem[7] << 8) | (mem[8] << 16) | (mem[9] << 24)
-            return mode, lw, ls
+        if len(mem) >= 3 and mem[0] == 0xAB:
+            return mem[1] | (mem[2] << 8)
     except Exception:
         pass
-    return 0, 0, 0  # defaults: weather mode, never updated
+    return 0
 
 
-def _rtc_write(mode, last_weather, last_server):
-    """Write persistent state to RTC memory"""
+def _rtc_write_hash(name_hash):
+    """Persist the shown photo's name hash to RTC memory."""
     try:
-        lw = last_weather & 0xFFFFFFFF
-        ls = last_server & 0xFFFFFFFF
-        mem = bytes(
-            [
-                0xAB,
-                mode,
-                lw & 0xFF,
-                (lw >> 8) & 0xFF,
-                (lw >> 16) & 0xFF,
-                (lw >> 24) & 0xFF,
-                ls & 0xFF,
-                (ls >> 8) & 0xFF,
-                (ls >> 16) & 0xFF,
-                (ls >> 24) & 0xFF,
-            ]
-        )
-        rtc.memory(mem)
+        name_hash = name_hash & 0xFFFF
+        rtc.memory(bytes([0xAB, name_hash & 0xFF, (name_hash >> 8) & 0xFF]))
     except Exception as e:
         print("RTC write failed: {}".format(e))
 
 
-def wifi_off():
-    """Disconnect and power down WiFi radio"""
+def draw_message(title, message):
+    """Full-refresh fallback screen (no SD card / no photos)."""
+    graphics.set_pen(PEN_WHITE)
+    graphics.clear()
+    graphics.set_pen(PEN_RED)
+    graphics.text(title, 40, 180, scale=6)
+    graphics.set_pen(PEN_BLACK)
+    graphics.text(message, 40, 280, scale=2)
+    graphics.update()
+
+
+def show_photo(path):
+    """Decode and display a single JPG, dithered to the 7-color palette."""
+    print("Showing {}".format(path))
+    gc.collect()  # jpegdec is memory-hungry; free up first
     try:
-        wlan = network.WLAN(network.STA_IF)
-        wlan.disconnect()
-        wlan.active(False)
-        print("WiFi off")
+        j = jpegdec.JPEG(graphics)
+        j.open_file(path)
+        # Draw at (0,0), full scale. Image should already be 800x480.
+        j.decode(0, 0, jpegdec.JPEG_SCALE_FULL, dither=True)
+        graphics.update()
+        return True
     except Exception as e:
-        print("WiFi off failed: {}".format(e))
+        print("Decode failed: {}".format(e))
+        draw_message("BAD IMAGE", "Could not decode {}".format(path))
+        return False
 
 
 def go_to_sleep(seconds):
-    """Power off WiFi, LED, then deep sleep for given seconds.
-    Buttons A/B are wired to wake pins on the Inky Frame hardware.
-    """
+    """Power off LED, then deep sleep. Buttons A/B wake via hardware."""
     print("Sleeping {}s ...".format(seconds))
     _led.off()
-    wifi_off()
 
-    # Schedule RTC wake
-    inky_frame.sleep_for(seconds // 60)  # sleep_for takes minutes
+    # Schedule RTC wake (sleep_for takes minutes; keep at least 1)
+    minutes = seconds // 60
+    if minutes < 1:
+        minutes = 1
+    inky_frame.sleep_for(minutes)
 
-    # Release power latch — board powers off here if on battery.
-    # On USB power the Pico stays on but sleeps.
+    # Release power latch -- board powers off here if on battery.
     _pwr.value(0)
 
-    # Fallback: if USB powered (pwr latch ignored), use machine sleep
+    # Fallback: if USB powered (latch ignored), use machine sleep.
     machine.lightsleep(seconds * 1000)
 
 
-print("=== Unified Dashboard ===")
+# ─── Main ─────────────────────────────────────────────────────────────────────
+print("=== Photo Slideshow ===")
 
-# --- Identify wake reason ---
+# Identify wake reason (both buttons just trigger an early random advance)
 wake_a = inky_frame.button_a.read()
 wake_b = inky_frame.button_b.read()
-wake_timer = not (wake_a or wake_b)  # no button = timer or first boot
+print("Wake: A={} B={}".format(wake_a, wake_b))
 
-print("Wake: A={} B={} timer={}".format(wake_a, wake_b, wake_timer))
+if not mount_sd():
+    draw_message("NO SD CARD", "Insert a microSD card with a /photos folder.")
+    go_to_sleep(SLIDESHOW_INTERVAL)
 
-# --- Load persistent state ---
-display_mode, last_weather, last_server = _rtc_read()
-print("State: mode={} lw={} ls={}".format(display_mode, last_weather, last_server))
+# `random` is NOT auto-seeded on rp2, and time.time() is never synced here
+# (no WiFi/NTP), so both give the same value every boot. os.urandom() can
+# block on this firmware's hardware RNG, so instead seed from ticks_us()
+# (real-world jitter from the SD mount above varies it boot to boot) mixed
+# with the chip's unique id. Both calls are guaranteed non-blocking.
+try:
+    _seed = time.ticks_us() ^ int.from_bytes(machine.unique_id(), "big")
+    random.seed(_seed)
+except Exception as e:
+    print("Random seed failed: {}".format(e))
 
-# --- Connect WiFi ---
-if not ensure_wifi():
-    print("WiFi failed — sleeping 60s")
-    go_to_sleep(60)
+# Pick a random photo, avoiding an immediate repeat, without ever loading
+# the full directory listing into memory (see pick_random_photo()).
+prev_hash = _rtc_read_hash()
+path, shown_hash = pick_random_photo(prev_hash)
 
-# --- Sync NTP on first boot (timestamps = 0) ---
-if last_weather == 0:
-    sync_ntp()
+if path is None:
+    draw_message("NO PHOTOS", "Add baseline 800x480 JPGs to {}".format(PHOTO_DIR))
+    go_to_sleep(SLIDESHOW_INTERVAL)
 
-now = time.time()
+_led.off()
+show_photo(path)
 
-# --- Determine what to fetch and display ---
-if wake_a:
-    # Button A → always show weather with fresh data
-    display_mode = 0
-    _led.off()
-    weather_data = fetch_weather()
-    date_str, time_str, tz = local_now()
-    draw_weather(weather_data, date_str, time_str, tz)
-    last_weather = time.time()
-
-elif wake_b:
-    # Button B → always show server with fresh data
-    display_mode = 1
-    _led.off()
-    server_data = fetch_server_status()
-    date_str, time_str, tz = local_now()
-    draw_server_status(server_data, date_str, time_str, tz)
-    last_server = time.time()
-
-else:
-    # Timer wake or first boot → refresh whichever display is active if due
-    date_str, time_str, tz = local_now()
-    if display_mode == 0:
-        weather_data = fetch_weather()
-        draw_weather(weather_data, date_str, time_str, tz)
-        last_weather = time.time()
-    else:
-        server_data = fetch_server_status()
-        draw_server_status(server_data, date_str, time_str, tz)
-        last_server = time.time()
-
-# --- Save state ---
-_rtc_write(display_mode, last_weather, last_server)
-
-# --- Sleep until next refresh ---
-next_refresh = SERVER_REFRESH if display_mode == 1 else WEATHER_REFRESH
-go_to_sleep(next_refresh)
+# Save position, then sleep until next advance
+_rtc_write_hash(shown_hash)
+go_to_sleep(SLIDESHOW_INTERVAL)
